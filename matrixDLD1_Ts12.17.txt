@@ -1,0 +1,3 @@
+Samples	baseline	Ts3.12.17
+DLD1_Ts3.12.17_D0	1	0
+DLD1_Ts3.12.17_D10	1	1
