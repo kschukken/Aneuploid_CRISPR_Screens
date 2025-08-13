@@ -1,0 +1,3 @@
+Samples	baseline	Ctrl_3
+DLD1_Ctrl_3_D0	1	0
+DLD1_Ctrl_3_D10	1	1

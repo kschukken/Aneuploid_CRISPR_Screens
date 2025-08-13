@@ -1,0 +1,3 @@
+Samples	baseline	Cont2
+A2780_Cont2_D0	1	0
+A2780_Cont2_D10	1	1

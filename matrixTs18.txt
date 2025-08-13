@@ -1,0 +1,3 @@
+Samples	baseline	Ts18
+A2780_Ts18_D0	1	0
+A2780_Ts18_D10	1	1
