@@ -1,0 +1,3 @@
+Samples	baseline	Ts8
+A2780_Ts8_D0	1	0
+A2780_Ts8_D10	1	1
