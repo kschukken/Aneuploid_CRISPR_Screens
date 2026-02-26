@@ -10,7 +10,8 @@ Data repository for scientific article about paired CRISPR screens between aneup
 
 TO RUN CODE: 
 To run all the code and produce figure graphs, download the "Code" files, the "Data" files and the "Dependency" files. All code is written in R. 
-ADDITIONALLY: please download "CRISPRGeneEffect.csv" CRISPR dropout data from DepMap data (Downloaded November 9, 2023), "OmicsExpressionProteinCodingGenesTPMLogp1.csv" RNA expression data from DepMap (DepMap, Broad (2024). 24Q4), and "mmc2.xlsx" DepMap proteomics data (Downloaded august 2020). These files were too big to be uploaded to Github. 
+ADDITIONALLY: please download "CRISPRGeneEffect.csv" CRISPR dropout data from DepMap data (DepMap, Broad (2024). 24Q4), "OmicsExpressionProteinCodingGenesTPMLogp1.csv" RNA expression data from DepMap (DepMap, Broad (2024). 24Q4), and "mmc2.xlsx" normalized proteomics data (Nusinow et al. 2020) (DOI: 10.1016/j.cell.2019.12.023) (Downloaded august 2020). These files were too big to be uploaded to Github. 
+
 Note: "OmicsExpressionProteinCodingGenesTPMLogp1.csv" and "mmc2.xlsx" are only needed for Supplementary Figure 7, DepMep RNA and Proteomics analysis. You can run most of the code without these files. CRISPRGeneEffect.csv is used in multiple figures though. 
 
 
