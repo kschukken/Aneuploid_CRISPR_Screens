@@ -132,6 +132,9 @@ DepMap_Expression<- read.csv("OmicsExpressionProteinCodingGenesTPMLogp1.csv", he
 
 # DepMap Proteomics data
 # downloaded August 2020
+# Normalized Protein Expression data 
+# https://www.cell.com/cell/fulltext/S0092-8674(19)31385-6#secsectitle0190
+# Nusinow et al. Cell, 2020, Quantitative proteomics of the cancer cell line encyclopedia
 
 Protein_Expression.1<-read_excel("mmc2.xlsx", 
                                  sheet= "Normalized Protein Expression")
