@@ -1,5 +1,5 @@
 # Aneuploid_CRISPR_Screens
-Data repository for BioRxiv article: Schukken, K.M., et al. "Paired CRISPR screens identify mitochondrial metabolism and UBE2H as aneuploid-specific dependencies in human cancer cell lines" (2026) 
+Data repository for unpublished manuscript: Schukken, K.M., et al. "Paired CRISPR screens identify mitochondrial metabolism and UBE2H as aneuploid-specific dependencies in human cancer cell lines" (2026) 
 
 
 *****
