@@ -14,6 +14,8 @@ Data repository for unpublished manuscript: Schukken, K.M., et al. "Paired CRISP
 
 "SupData" Folder: This folder contains the supplementary data files for this article, not including the karyotype file Supplementary Data 2, as that is too large for Github. 
 
+"TP53Sequences" Folder: This folder contains the consensus file for the TP53 sequences for MCF10A and AGS WT and Di1q at the start and end of the CRISPR screens. MCF10A and AGS are TP5-WT cell lines. 
+
 *****
 
 TO RUN CODE: 
