@@ -24,7 +24,7 @@ TO RUN CODE:
 To run all the code and produce figure graphs, download the "Code" files, the "Data" files and the "Dependency" files. All code is written in R. 
 ADDITIONALLY: please download "CRISPRGeneEffect.csv" CRISPR dropout data from DepMap data (DepMap, Broad (2024). 24Q4), "OmicsExpressionProteinCodingGenesTPMLogp1.csv" RNA expression data from DepMap (DepMap, Broad (2024). 24Q4), and "mmc2.xlsx" normalized proteomics data (Nusinow et al. 2020) (DOI: 10.1016/j.cell.2019.12.023) (Downloaded august 2020). These files were too big to be uploaded to Github and can be downloaded from DepMap.org. 
 
-Note: "OmicsExpressionProteinCodingGenesTPMLogp1.csv" and "mmc2.xlsx" are only needed for Supplementary Figure 7, DepMep RNA and Proteomics analysis. You can run most of the code without these files. CRISPRGeneEffect.csv is used in multiple figures. 
+Note: "OmicsExpressionProteinCodingGenesTPMLogp1.csv" and "mmc2.xlsx" are only needed for Figure S3 and S7, DepMep RNA and Proteomics analysis. You can run most of the code without these files. CRISPRGeneEffect.csv is used in multiple figures. 
 
 
 TO LOOK UP INFO IN ANALYZED DATA: 
