@@ -5,6 +5,7 @@ Data repository for unpublished manuscript: Schukken, K.M., et al. "Paired CRISP
 *****
 
 "Code" Folder: This folder contains the R code files used to analyse data and produce graphs in this article. 
+            --- With Code is "Shaunak_Analysis" This folder contains the files and code to analyze datasets GSE188644, GSE313191, GSE111672 and GSE84465. Figures S7H, S7I, S7Q, S7R
 
 "Data" Folder: This folder contains count files and MAGeCK CRISPR screen analysis files for the paired CRISPR screens performed for this article. This folder also contains the Mass Spec proteomics files produced for this paper. 
 
