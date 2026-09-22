@@ -1,0 +1,76 @@
+<?xml version='1.0' encoding='UTF-8' ?>
+<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='504.00pt' height='396.00pt' viewBox='0 0 504.00 396.00'>
+<g class='svglite'>
+<defs>
+  <style type='text/css'><![CDATA[
+    .svglite line, .svglite polyline, .svglite polygon, .svglite path, .svglite rect, .svglite circle {
+      fill: none;
+      stroke: #000000;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-miterlimit: 10.00;
+    }
+    .svglite text {
+      white-space: pre;
+    }
+    .svglite g.glyphgroup path {
+      fill: inherit;
+      stroke: none;
+    }
+  ]]></style>
+</defs>
+<rect width='100%' height='100%' style='stroke: none; fill: #FFFFFF;'/>
+<defs>
+  <clipPath id='cpMC4wMHw1MDQuMDB8MC4wMHwzOTYuMDA='>
+    <rect x='0.00' y='0.00' width='504.00' height='396.00' />
+  </clipPath>
+</defs>
+<g clip-path='url(#cpMC4wMHw1MDQuMDB8MC4wMHwzOTYuMDA=)'>
+<rect x='0.00' y='0.00' width='504.00' height='396.00' style='stroke-width: 1.36; stroke: #FFFFFF; fill: #FFFFFF;' />
+</g>
+<defs>
+  <clipPath id='cpMzUuOTJ8NDk3LjAzfDQ2LjY4fDM1NS45Mw=='>
+    <rect x='35.92' y='46.68' width='461.10' height='309.24' />
+  </clipPath>
+</defs>
+<g clip-path='url(#cpMzUuOTJ8NDk3LjAzfDQ2LjY4fDM1NS45Mw==)'>
+<rect x='35.92' y='46.68' width='461.10' height='309.24' style='stroke-width: 1.36; stroke: none; fill: #FFFFFF;' />
+<line x1='122.38' y1='191.69' x2='122.38' y2='73.19' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<line x1='122.38' y1='341.87' x2='122.38' y2='341.87' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<polygon points='79.15,191.69 79.15,341.87 165.61,341.87 165.61,191.69 79.15,191.69 ' style='stroke-width: 1.28; stroke-linecap: butt; stroke-linejoin: miter; fill: #B44FA3; fill-opacity: 0.80;' />
+<line x1='79.15' y1='341.87' x2='165.61' y2='341.87' style='stroke-width: 2.56; stroke-linecap: butt; stroke-linejoin: miter;' />
+<line x1='266.47' y1='156.09' x2='266.47' y2='60.74' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<line x1='266.47' y1='341.87' x2='266.47' y2='341.87' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<polygon points='223.25,156.09 223.25,341.87 309.70,341.87 309.70,156.09 223.25,156.09 ' style='stroke-width: 1.28; stroke-linecap: butt; stroke-linejoin: miter; fill: #B44FA3; fill-opacity: 0.80;' />
+<line x1='223.25' y1='229.30' x2='309.70' y2='229.30' style='stroke-width: 2.56; stroke-linecap: butt; stroke-linejoin: miter;' />
+<line x1='410.57' y1='168.10' x2='410.57' y2='75.48' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<line x1='410.57' y1='260.52' x2='410.57' y2='341.87' style='stroke-width: 1.28; stroke-linecap: butt;' />
+<polygon points='367.34,168.10 367.34,260.52 453.80,260.52 453.80,168.10 367.34,168.10 ' style='stroke-width: 1.28; stroke-linecap: butt; stroke-linejoin: miter; fill: #B44FA3; fill-opacity: 0.80;' />
+<line x1='367.34' y1='207.28' x2='453.80' y2='207.28' style='stroke-width: 2.56; stroke-linecap: butt; stroke-linejoin: miter;' />
+<text x='43.72' y='72.20' style='font-size: 14.23px; font-family: "Arial";' textLength='51.97px' lengthAdjust='spacingAndGlyphs'>ρ = 0.30</text>
+<text x='47.96' y='92.68' style='font-size: 14.23px; font-family: "Arial";' textLength='80.23px' lengthAdjust='spacingAndGlyphs'>p = 4.41e-07</text>
+</g>
+<g clip-path='url(#cpMC4wMHw1MDQuMDB8MC4wMHwzOTYuMDA=)'>
+<polyline points='35.92,355.93 35.92,46.68 ' style='stroke-width: 1.36; stroke-linecap: square;' />
+<text x='29.65' y='345.88' text-anchor='end' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='6.22px' lengthAdjust='spacingAndGlyphs'>0</text>
+<text x='29.65' y='248.46' text-anchor='end' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='6.22px' lengthAdjust='spacingAndGlyphs'>1</text>
+<text x='29.65' y='151.05' text-anchor='end' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='6.22px' lengthAdjust='spacingAndGlyphs'>2</text>
+<text x='29.65' y='53.64' text-anchor='end' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='6.22px' lengthAdjust='spacingAndGlyphs'>3</text>
+<polyline points='32.44,341.87 35.92,341.87 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='32.44,244.46 35.92,244.46 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='32.44,147.04 35.92,147.04 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='32.44,49.63 35.92,49.63 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='35.92,355.93 497.03,355.93 ' style='stroke-width: 1.36; stroke-linecap: square;' />
+<polyline points='122.38,359.41 122.38,355.93 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='266.47,359.41 266.47,355.93 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<polyline points='410.57,359.41 410.57,355.93 ' style='stroke-width: 1.36; stroke-linecap: butt;' />
+<text x='122.38' y='370.22' text-anchor='middle' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='18.66px' lengthAdjust='spacingAndGlyphs'>0–1</text>
+<text x='266.47' y='370.22' text-anchor='middle' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='6.22px' lengthAdjust='spacingAndGlyphs'>2</text>
+<text x='410.57' y='370.22' text-anchor='middle' style='font-size: 11.20px; font-weight: bold; font-family: "Arial";' textLength='12.75px' lengthAdjust='spacingAndGlyphs'>3+</text>
+<text x='266.47' y='386.08' text-anchor='middle' style='font-size: 14.00px; font-weight: bold; font-family: "Arial";' textLength='206.84px' lengthAdjust='spacingAndGlyphs'>Aneuploidy score excluding 7q</text>
+<text transform='translate(17.00,201.31) rotate(-90)' text-anchor='middle' style='font-size: 14.00px; font-weight: bold; font-family: "Arial";' textLength='251.23px' lengthAdjust='spacingAndGlyphs'>UBE2H Seurat-normalized expression</text>
+<text x='266.47' y='37.39' text-anchor='middle' style='font-size: 11.00px;fill: #4D4D4D; font-family: "Arial";' textLength='206.12px' lengthAdjust='spacingAndGlyphs'>Cancer cells, chromosome 7q-neutral only</text>
+<text x='266.47' y='19.01' text-anchor='middle' style='font-size: 16.80px; font-weight: bold; font-family: "Arial";' textLength='351.91px' lengthAdjust='spacingAndGlyphs'>PDAC-A: UBE2H by aneuploidy score group</text>
+</g>
+</g>
+</svg>
