@@ -1,0 +1,1428 @@
+---
+title: "GSE84465 CopyKAT and UBE2H analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+params:
+  run_copykat: false
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(here)
+library(data.table)
+library(Matrix)
+library(tidyverse)
+library(copykat)
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(ggpubr)
+library(rstatix)
+library(gt)
+library(broom)
+library(svglite)
+
+patients <- c("BT_S1", "BT_S2", "BT_S4", "BT_S6")
+exclude_arms <- c("13p", "14p", "15p", "21p", "22p")
+fraction_threshold <- 0.80
+
+# Edit if the repository layout changes.
+copykat_rds <- here(
+  "data", "GSE84465", "GSE84465_all_CopyKAT_results.rds"
+)
+
+counts_file_candidates <- c(
+  here("data", "GSE84465", "GSE84465_GBM_All_data.csv.gz"),
+  here("data", "GSE84465", "GSE84465_GBM_All_data.csv")
+)
+
+series_file <- here(
+  "data", "GSE84465", "GSE84465_series_matrix.txt"
+)
+
+arm_coords_file <- here("data", "arm_coords.csv")
+
+output_dir <- here("results", "GSE84465")
+figure_dir <- here("figures")
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+
+counts_file <- counts_file_candidates[file.exists(counts_file_candidates)][1]
+
+if (is.na(counts_file)) {
+  stop(
+    "Count matrix not found. Expected one of:\n",
+    paste(counts_file_candidates, collapse = "\n")
+  )
+}
+
+copykat_cores <- 4L
+```
+
+# Read the raw count matrix
+
+```{r read-counts}
+message("Reading count matrix: ", counts_file)
+
+counts_df <- read.table(
+  counts_file,
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE,
+  sep = "",
+  quote = "\"",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+counts <- as.matrix(counts_df)
+storage.mode(counts) <- "numeric"
+rm(counts_df)
+invisible(gc())
+
+counts <- counts[!duplicated(rownames(counts)), , drop = FALSE]
+counts <- counts[rowSums(counts) > 0, , drop = FALSE]
+
+stopifnot(
+  nrow(counts) > 1000,
+  ncol(counts) > 1,
+  all(is.finite(counts)),
+  all(counts >= 0),
+  all(counts == floor(counts))
+)
+
+cat(sprintf(
+  "Raw count matrix: %d genes x %d cells\n",
+  nrow(counts),
+  ncol(counts)
+))
+```
+
+# Parse GEO sample metadata
+
+```{r parse-series-matrix}
+if (!file.exists(series_file)) {
+  stop("Series matrix not found: ", series_file)
+}
+
+series_lines <- readLines(series_file, warn = FALSE)
+
+parse_geo_row <- function(line) {
+  fields <- strsplit(line, "\t", fixed = TRUE)[[1]]
+  gsub('^"|"$', "", fields)
+}
+
+sample_rows <- lapply(
+  series_lines[grepl("^!Sample_", series_lines)],
+  parse_geo_row
+)
+
+get_characteristic <- function(label) {
+  matching_rows <- Filter(
+    function(x) {
+      length(x) > 1 &&
+        x[1] == "!Sample_characteristics_ch1" &&
+        startsWith(x[2], paste0(label, ":"))
+    },
+    sample_rows
+  )
+
+  if (length(matching_rows) != 1) {
+    stop(
+      "Expected exactly one metadata row for '",
+      label,
+      "' but found ",
+      length(matching_rows),
+      "."
+    )
+  }
+
+  sub(
+    paste0("^", label, ":\\s*"),
+    "",
+    matching_rows[[1]][-1]
+  )
+}
+
+description_rows <- Filter(
+  function(x) x[1] == "!Sample_description",
+  sample_rows
+)
+
+cell_description_rows <- description_rows[
+  vapply(
+    description_rows,
+    function(x) any(grepl("^[0-9]+\\.[A-H][0-9]+$", x[-1])),
+    logical(1)
+  )
+]
+
+if (length(cell_description_rows) != 1) {
+  stop("Could not uniquely identify the GEO row containing cell IDs.")
+}
+
+cell_metadata <- data.frame(
+  cell = cell_description_rows[[1]][-1],
+  patient = get_characteristic("patient id"),
+  plate = get_characteristic("plate id"),
+  well = get_characteristic("well"),
+  cell_type = get_characteristic("cell type"),
+  neoplastic = get_characteristic("neoplastic"),
+  tissue = get_characteristic("tissue"),
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+rownames(cell_metadata) <- cell_metadata$cell
+
+missing_metadata <- setdiff(colnames(counts), rownames(cell_metadata))
+
+if (length(missing_metadata) > 0) {
+  stop(
+    length(missing_metadata),
+    " count-matrix cells are absent from the GEO metadata."
+  )
+}
+
+cell_metadata <- cell_metadata[colnames(counts), , drop = FALSE]
+
+stopifnot(
+  identical(rownames(cell_metadata), colnames(counts))
+)
+
+cell_metadata <- cell_metadata %>%
+  mutate(
+    patient = factor(patient, levels = patients),
+    input_group = case_when(
+      tolower(neoplastic) == "regular" ~ "reference",
+      tolower(neoplastic) == "neoplastic" ~ "observation",
+      TRUE ~ NA_character_
+    )
+  )
+
+cat("Cells per patient:\n")
+print(table(cell_metadata$patient, useNA = "ifany"))
+
+cat("\nNeoplastic annotation by patient:\n")
+print(table(
+  cell_metadata$patient,
+  cell_metadata$neoplastic,
+  useNA = "ifany"
+))
+
+stopifnot(
+  all(patients %in% unique(as.character(cell_metadata$patient)))
+)
+
+group_counts <- cell_metadata %>%
+  count(patient, input_group) %>%
+  arrange(patient, input_group)
+
+group_counts %>% gt()
+
+for (p in patients) {
+  n_ref <- sum(
+    cell_metadata$patient == p &
+      cell_metadata$input_group == "reference",
+    na.rm = TRUE
+  )
+
+  n_obs <- sum(
+    cell_metadata$patient == p &
+      cell_metadata$input_group == "observation",
+    na.rm = TRUE
+  )
+
+  if (n_ref < 5) {
+    stop(p, " has fewer than five reference cells.")
+  }
+
+  if (n_obs < 1) {
+    stop(p, " has no neoplastic observation cells.")
+  }
+}
+```
+
+# Run or load CopyKAT for each patient
+
+Set `params$run_copykat: true` to run CopyKAT. Otherwise, the notebook loads the RDS file.
+
+```{r copykat-four-patients}
+copykat_results <- NULL
+
+if (isTRUE(params$run_copykat)) {
+
+  copykat_results <- setNames(
+    vector("list", length(patients)),
+    patients
+  )
+
+  for (p in patients) {
+    message("Running CopyKAT for ", p)
+
+    patient_cells <- rownames(cell_metadata)[
+      cell_metadata$patient == p
+    ]
+
+    patient_counts <- counts[
+      ,
+      patient_cells,
+      drop = FALSE
+    ]
+
+    patient_meta <- cell_metadata[
+      patient_cells,
+      ,
+      drop = FALSE
+    ]
+
+    # Remove genes not detected in this patient.
+    patient_counts <- patient_counts[
+      rowSums(patient_counts) > 0,
+      ,
+      drop = FALSE
+    ]
+
+    # Light QC to avoid near-empty cells.
+    detected_genes <- colSums(patient_counts > 0)
+    library_size <- colSums(patient_counts)
+
+    keep_cells <- (
+      detected_genes >= 200 &
+      library_size >= 500
+    )
+
+    patient_counts <- patient_counts[
+      ,
+      keep_cells,
+      drop = FALSE
+    ]
+
+    patient_meta <- patient_meta[
+      colnames(patient_counts),
+      ,
+      drop = FALSE
+    ]
+
+    norm_cells <- rownames(patient_meta)[
+      patient_meta$input_group == "reference"
+    ]
+
+    cat(sprintf(
+      "%s: %d genes x %d cells; %d regular reference cells\n",
+      p,
+      nrow(patient_counts),
+      ncol(patient_counts),
+      length(norm_cells)
+    ))
+
+    if (length(norm_cells) < 5) {
+      stop(
+        p,
+        " has fewer than five regular reference cells after QC."
+      )
+    }
+
+    patient_dir <- file.path(output_dir, p)
+
+    dir.create(
+      patient_dir,
+      recursive = TRUE,
+      showWarnings = FALSE
+    )
+
+    old_wd <- getwd()
+
+    result <- tryCatch(
+      {
+        setwd(patient_dir)
+
+        copykat::copykat(
+          rawmat = patient_counts,
+          id.type = "S",
+          ngene.chr = 5,
+          win.size = 25,
+          KS.cut = 0.1,
+          sam.name = p,
+          distance = "euclidean",
+          norm.cell.names = norm_cells,
+          output.seg = "FALSE",
+          plot.genes = "TRUE",
+          n.cores = copykat_cores
+        )
+      },
+      finally = {
+        setwd(old_wd)
+      }
+    )
+
+    copykat_results[[p]] <- result
+  }
+
+  # Save one combined four-patient object.
+  dir.create(
+    dirname(copykat_rds),
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+
+  saveRDS(
+    copykat_results,
+    copykat_rds
+  )
+
+} else {
+
+  if (!file.exists(copykat_rds)) {
+    stop(
+      "Combined CopyKAT RDS not found: ",
+      copykat_rds,
+      ". Set params$run_copykat to true to generate it."
+    )
+  }
+
+  copykat_results <- readRDS(
+    copykat_rds
+  )
+}
+
+missing_patients <- setdiff(
+  patients,
+  names(copykat_results)
+)
+
+if (length(missing_patients) > 0) {
+  stop(
+    "Combined CopyKAT object is missing: ",
+    paste(missing_patients, collapse = ", ")
+  )
+}
+
+for (p in patients) {
+  required_components <- c("prediction", "CNAmat")
+
+  missing_components <- setdiff(
+    required_components,
+    names(copykat_results[[p]])
+  )
+
+  if (length(missing_components) > 0) {
+    stop(
+      "CopyKAT result for ",
+      p,
+      " is missing: ",
+      paste(missing_components, collapse = ", ")
+    )
+  }
+}
+
+cat("Loaded CopyKAT results for:\n")
+print(names(copykat_results))
+```
+
+
+# Combine CopyKAT predictions
+
+```{r combine-predictions}
+pred_all <- bind_rows(lapply(patients, function(p) {
+  pred <- as.data.frame(copykat_results[[p]]$prediction)
+
+  pred %>%
+    mutate(
+      patient = p,
+      cell_type = cell_metadata[cell.names, "cell_type"],
+      neoplastic = cell_metadata[cell.names, "neoplastic"],
+      input_group = cell_metadata[cell.names, "input_group"]
+    )
+}))
+
+stopifnot(
+  !anyNA(pred_all$patient),
+  !anyNA(pred_all$cell.names)
+)
+
+cat("Overall CopyKAT calls:\n")
+print(table(pred_all$copykat.pred, useNA = "ifany"))
+
+cat("\nCopyKAT calls by patient:\n")
+print(table(
+  pred_all$patient,
+  pred_all$copykat.pred,
+  useNA = "ifany"
+))
+
+cat("\nCopyKAT calls by patient and input group:\n")
+print(xtabs(
+  ~ patient + input_group + copykat.pred,
+  data = pred_all
+))
+
+write.table(
+  pred_all,
+  file.path(output_dir, "GSE84465_all_CopyKAT_predictions.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+pred_all %>%
+  count(patient, input_group, copykat.pred) %>%
+  arrange(patient, input_group, copykat.pred) %>%
+  gt(groupname_col = "patient") %>%
+  tab_header(title = "CopyKAT predictions across four patients") %>%
+  cols_label(
+    input_group = "Input group",
+    copykat.pred = "CopyKAT prediction",
+    n = "Cell count"
+  )
+```
+
+# Normalize UBE2H expression
+
+```{r normalize-ube2h}
+seu <- CreateSeuratObject(
+  counts = as(counts, "dgCMatrix"),
+  meta.data = cell_metadata,
+  project = "GSE84465_GBM",
+  min.cells = 0,
+  min.features = 0
+)
+
+seu <- NormalizeData(
+  seu,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  verbose = FALSE
+)
+
+ube2h_matches <- which(toupper(rownames(seu)) == "UBE2H")
+stopifnot(length(ube2h_matches) == 1)
+
+ube2h_id <- rownames(seu)[ube2h_matches]
+
+ube2h_df <- FetchData(
+  seu,
+  vars = ube2h_id,
+  layer = "data"
+)
+
+colnames(ube2h_df) <- "UBE2H_normalized"
+ube2h_df$cell <- rownames(ube2h_df)
+```
+
+# Read chromosome-arm coordinates
+
+```{r arm-coordinates}
+if (!file.exists(arm_coords_file)) {
+  stop("Chromosome-arm coordinate file not found: ", arm_coords_file)
+}
+
+arm_coords <- read_csv(
+  arm_coords_file,
+  show_col_types = FALSE
+)
+
+required_arm_cols <- c("chrom_num", "arm", "start", "end")
+
+stopifnot(
+  all(required_arm_cols %in% colnames(arm_coords))
+)
+```
+
+# Extract CN values and derive patient-specific thresholds
+
+```{r patient-thresholds}
+cn_values_list <- setNames(vector("list", length(patients)), patients)
+cn_annotation_list <- setNames(vector("list", length(patients)), patients)
+
+threshold_rows <- vector("list", length(patients))
+signal_rows <- vector("list", length(patients))
+
+for (i in seq_along(patients)) {
+  p <- patients[[i]]
+
+  cn <- as.data.frame(
+    copykat_results[[p]]$CNAmat,
+    check.names = FALSE
+  )
+
+  # Reverse syntactic-name conversion applied by R to numeric-leading IDs.
+  colnames(cn) <- sub(
+    "^X(?=[0-9])",
+    "",
+    colnames(cn),
+    perl = TRUE
+  )
+
+  required_annotation_cols <- c("chrom", "chrompos", "abspos")
+
+  stopifnot(
+    all(required_annotation_cols %in% colnames(cn))
+  )
+
+  patient_pred <- pred_all %>%
+    filter(patient == p)
+
+  copykat_cell_cols <- intersect(
+    patient_pred$cell.names,
+    colnames(cn)
+  )
+
+  if (length(copykat_cell_cols) == 0) {
+    stop("No CopyKAT CN columns matched predictions for ", p, ".")
+  }
+
+  cn_values <- as.matrix(
+    cn[, copykat_cell_cols, drop = FALSE]
+  )
+
+  storage.mode(cn_values) <- "numeric"
+
+  diploid_cells <- patient_pred$cell.names[
+    patient_pred$copykat.pred == "diploid"
+  ]
+
+  diploid_cells <- intersect(
+    diploid_cells,
+    colnames(cn_values)
+  )
+
+  if (length(diploid_cells) == 0) {
+    stop("No CopyKAT-predicted diploid cells found for ", p, ".")
+  }
+
+  diploid_signal <- as.numeric(
+    cn_values[, diploid_cells, drop = FALSE]
+  )
+
+  diploid_signal <- diploid_signal[is.finite(diploid_signal)]
+
+  bin_signal_threshold <- unname(
+    quantile(
+      abs(diploid_signal),
+      probs = 0.90,
+      na.rm = TRUE
+    )
+  )
+
+  cn_values_list[[p]] <- cn_values
+  cn_annotation_list[[p]] <- cn
+
+  threshold_rows[[i]] <- tibble(
+    patient = p,
+    n_diploid_cells = length(diploid_cells),
+    bin_signal_threshold = bin_signal_threshold
+  )
+
+  signal_rows[[i]] <- tibble(
+    patient = p,
+    signal = diploid_signal,
+    bin_signal_threshold = bin_signal_threshold
+  )
+
+  cat(sprintf(
+    "%s: %d bins x %d cells; threshold = %.6f\n",
+    p,
+    nrow(cn_values),
+    ncol(cn_values),
+    bin_signal_threshold
+  ))
+}
+
+threshold_df <- bind_rows(threshold_rows) %>%
+  mutate(patient = factor(patient, levels = patients))
+
+signal_df <- bind_rows(signal_rows) %>%
+  mutate(patient = factor(patient, levels = patients))
+
+threshold_df %>% gt()
+```
+
+```{r threshold-distributions, fig.width=10, fig.height=7}
+ggplot(signal_df, aes(x = signal)) +
+  geom_histogram(
+    bins = 150,
+    boundary = 0
+  ) +
+  geom_vline(
+    data = threshold_df,
+    aes(xintercept = bin_signal_threshold),
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  geom_vline(
+    data = threshold_df,
+    aes(xintercept = -bin_signal_threshold),
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  facet_wrap(
+    ~ patient,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  labs(
+    title = "Distribution of CopyKAT bin signals in diploid cells",
+    subtitle = paste0(
+      "Dashed lines indicate each patient's 90th percentile ",
+      "of absolute diploid-cell signal"
+    ),
+    x = "CopyKAT bin signal",
+    y = "Bin-cell observations"
+  ) +
+  theme_classic()
+```
+
+# Convert CopyKAT bins to chromosome-arm calls
+
+An arm is called gained when at least 80% of its bins exceed the positive 
+patient-specific threshold and lost when at least 80% fall below the negative 
+threshold.
+
+```{r arm-calls-four-patients}
+bin_signal_thresholds <- threshold_df %>%
+  mutate(patient = as.character(patient)) %>%
+  select(patient, bin_signal_threshold) %>%
+  tibble::deframe()
+
+missing_thresholds <- setdiff(
+  patients,
+  names(bin_signal_thresholds)
+)
+
+if (length(missing_thresholds) > 0) {
+  stop(
+    "Missing thresholds for: ",
+    paste(missing_thresholds, collapse = ", ")
+  )
+}
+
+arm_call_list <- setNames(vector("list", length(patients)), patients)
+bin_arm_list <- setNames(vector("list", length(patients)), patients)
+arm_call_qc <- setNames(vector("list", length(patients)), patients)
+
+for (p in patients) {
+  cn <- cn_annotation_list[[p]]
+  cn_values <- cn_values_list[[p]]
+  bin_signal_threshold <- unname(bin_signal_thresholds[[p]])
+
+  bin_annot <- cn %>%
+    transmute(
+      bin_id = seq_len(nrow(cn)),
+      chrom = suppressWarnings(as.numeric(as.character(chrom))),
+      chrompos = as.numeric(chrompos),
+      abspos = as.numeric(abspos)
+    ) %>%
+    filter(chrom %in% 1:22)
+
+  bin_arm <- bin_annot %>%
+    inner_join(
+      arm_coords %>%
+        transmute(
+          chrom_num = as.numeric(chrom_num),
+          arm,
+          arm_start = start,
+          arm_end = end
+        ),
+      by = join_by(
+        chrom == chrom_num,
+        chrompos >= arm_start,
+        chrompos < arm_end
+      )
+    ) %>%
+    filter(!arm %in% exclude_arms) %>%
+    select(
+      bin_id,
+      chrom,
+      chrompos,
+      abspos,
+      arm
+    ) %>%
+    arrange(chrom, chrompos)
+
+  if (nrow(bin_arm) == 0) {
+    stop("No bins were assigned to chromosome arms for ", p, ".")
+  }
+
+  assignment_qc <- bin_arm %>%
+    count(bin_id, name = "n_assignments") %>%
+    summarise(
+      max_assignments = max(n_assignments),
+      duplicated_bins = sum(n_assignments > 1)
+    )
+
+  stopifnot(
+    assignment_qc$max_assignments <= 1
+  )
+
+  arms <- unique(bin_arm$arm)
+
+  arm_call <- matrix(
+    0L,
+    nrow = length(arms),
+    ncol = ncol(cn_values),
+    dimnames = list(arms, colnames(cn_values))
+  )
+
+  for (a in arms) {
+    bin_ids <- bin_arm$bin_id[bin_arm$arm == a]
+
+    x <- cn_values[
+      bin_ids,
+      ,
+      drop = FALSE
+    ]
+
+    frac_gain <- colMeans(
+      x > bin_signal_threshold,
+      na.rm = TRUE
+    )
+
+    frac_loss <- colMeans(
+      x < -bin_signal_threshold,
+      na.rm = TRUE
+    )
+
+    arm_call[
+      a,
+      frac_gain >= fraction_threshold
+    ] <- 1L
+
+    arm_call[
+      a,
+      frac_loss >= fraction_threshold
+    ] <- -1L
+  }
+
+  stopifnot(
+    !any(rownames(arm_call) %in% exclude_arms),
+    all(arm_call %in% c(-1L, 0L, 1L))
+  )
+
+  arm_call_list[[p]] <- arm_call
+  bin_arm_list[[p]] <- bin_arm
+
+  arm_call_qc[[p]] <- tibble(
+    patient = p,
+    bin_signal_threshold = bin_signal_threshold,
+    fraction_threshold = fraction_threshold,
+    total_copykat_bins = nrow(cn_values),
+    assigned_bins = nrow(bin_arm),
+    arms = nrow(arm_call),
+    cells = ncol(arm_call),
+    gain_calls = sum(arm_call == 1L),
+    loss_calls = sum(arm_call == -1L),
+    neutral_calls = sum(arm_call == 0L)
+  )
+}
+
+arm_call_qc_df <- bind_rows(arm_call_qc)
+arm_call_qc_df %>% gt()
+```
+
+# Build combined per-cell metadata and scores
+
+The variable `aneuploidy_score_no_7q` excludes 7q only
+
+```{r combined-final-meta}
+score_df <- bind_rows(lapply(patients, function(p) {
+  arm_call <- arm_call_list[[p]]
+
+  tibble(
+    cell = colnames(arm_call),
+    patient = p,
+    aneuploidy_score = colSums(abs(arm_call)),
+    aneuploidy_score_no_7q = colSums(abs(
+      arm_call[
+        !rownames(arm_call) %in% "7q",
+        ,
+        drop = FALSE
+      ]
+    )),
+    chr7q_call = if ("7q" %in% rownames(arm_call)) {
+      as.integer(arm_call["7q", ])
+    } else {
+      NA_integer_
+    }
+  )
+})) %>%
+  mutate(
+    patient = factor(patient, levels = patients),
+    chr7q_status = factor(
+      chr7q_call,
+      levels = c(-1, 0, 1),
+      labels = c("Loss", "Neutral", "Gain")
+    )
+  )
+
+final_meta <- pred_all %>%
+  transmute(
+    cell = cell.names,
+    patient,
+    cell_type,
+    neoplastic,
+    input_group,
+    copykat_call = copykat.pred
+  ) %>%
+  left_join(ube2h_df, by = "cell") %>%
+  left_join(score_df, by = c("cell", "patient"))
+
+stopifnot(
+  !anyNA(final_meta$cell),
+  !anyDuplicated(final_meta$cell)
+)
+
+write.table(
+  final_meta,
+  file.path(output_dir, "GSE84465_CopyKAT_per_cell_metadata.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+final_meta %>%
+  group_by(patient, input_group, copykat_call) %>%
+  summarise(
+    n = n(),
+    median_score = median(aneuploidy_score, na.rm = TRUE),
+    mean_score = mean(aneuploidy_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  gt()
+```
+
+
+# Build the core 7q-neutral analysis dataset
+
+This shared table contains neoplastic, chromosome 7q-neutral cells with
+non-missing UBE2H expression and aneuploidy scores. It is used by the pooled
+boxplot and patient-summary line plot.
+
+```{r core-7q-neutral-data}
+core_7q_neutral_df <- final_meta %>%
+  filter(
+    input_group == "observation",
+    chr7q_status == "Neutral",
+    !is.na(aneuploidy_score_no_7q),
+    !is.na(UBE2H_normalized),
+    !is.na(patient)
+  ) %>%
+  mutate(patient = factor(patient, levels = patients))
+
+core_7q_neutral_df %>%
+  count(patient, name = "n_cells") %>%
+  gt()
+```
+
+# Pooled Spearman correlation and fixed-score-group boxplot
+
+```{r pooled-binned-boxplot, fig.width=6.5, fig.height=6}
+pooled_df <- core_7q_neutral_df
+
+# Naive pooled Spearman correlation using the original continuous score.
+pooled_cor_test <- cor.test(
+  pooled_df$aneuploidy_score_no_7q,
+  pooled_df$UBE2H_normalized,
+  method = "spearman",
+  exact = FALSE
+)
+
+pooled_rho <- unname(pooled_cor_test$estimate)
+pooled_p <- pooled_cor_test$p.value
+pooled_n_cells <- nrow(pooled_df)
+pooled_n_patients <- n_distinct(pooled_df$patient)
+
+pooled_label <- paste0(
+  "\u03c1 = ", sprintf("%.2f", pooled_rho),
+  "\np = ",
+  format.pval(
+    pooled_p,
+    digits = 3,
+    eps = 2.2e-16
+  ),
+  "\n", pooled_n_cells,
+  " cells from ",
+  pooled_n_patients,
+  " patients"
+)
+
+pooled_score_group_df <- pooled_df %>%
+  mutate(
+    score_group = case_when(
+      aneuploidy_score_no_7q %in% 0:1 ~ "0–1",
+      aneuploidy_score_no_7q %in% 2:3 ~ "2–3",
+      aneuploidy_score_no_7q %in% 4:5 ~ "4–5",
+      aneuploidy_score_no_7q >= 6 ~ "6+",
+      TRUE ~ NA_character_
+    ),
+    score_group = factor(
+      score_group,
+      levels = c("0–1", "2–3", "4–5", "6+")
+    )
+  ) %>%
+  filter(!is.na(score_group))
+
+# Check pooled and patient-specific composition of each score group.
+pooled_score_group_counts <- pooled_score_group_df %>%
+  count(
+    score_group,
+    name = "n_cells",
+    .drop = FALSE
+  )
+
+pooled_score_group_counts %>% gt()
+
+pooled_score_group_patient_counts <- pooled_score_group_df %>%
+  count(
+    patient,
+    score_group,
+    name = "n_cells",
+    .drop = FALSE
+  )
+
+pooled_score_group_patient_counts %>% gt()
+
+p_pooled_score_group <- ggplot(
+  pooled_score_group_df,
+  aes(
+    x = score_group,
+    y = UBE2H_normalized
+  )
+) +
+  geom_boxplot(
+    fill = "#B44FA3",
+    color = "black",
+    outlier.shape = NA,
+    width = 0.62,
+    linewidth = 0.6
+  ) +
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = pooled_label,
+    hjust = -0.08,
+    vjust = 1.15,
+    size = 4.5
+  ) +
+  labs(
+    x = "Aneuploidy score excluding 7q",
+    y = "UBE2H Seurat-normalized expression",
+    title = "UBE2H by pooled aneuploidy score group",
+    subtitle = paste0(
+      "Neoplastic, chromosome 7q-neutral cells ",
+      "from four patients"
+    )
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text = element_text(
+      color = "black",
+      face = "bold"
+    ),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(
+      face = "bold",
+      hjust = 0.5
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size = 10.5
+    )
+  )
+
+p_pooled_score_group
+
+ggsave(
+  filename = file.path(
+    figure_dir,
+    "GSE84465_pooled_UBE2H_by_aneuploidy_score_group_7qneutral.svg"
+  ),
+  plot = p_pooled_score_group,
+  width = 6.5,
+  height = 6
+)
+```
+
+```{r combined-patient-summary-line-plot, fig.width=8, fig.height=6}
+combined_patient_df <- core_7q_neutral_df %>%
+  mutate(
+    score_group = case_when(
+      aneuploidy_score_no_7q %in% 0:1 ~ "0–1",
+      aneuploidy_score_no_7q %in% 2:3 ~ "2–3",
+      aneuploidy_score_no_7q %in% 4:5 ~ "4–5",
+      aneuploidy_score_no_7q >= 6 ~ "6+",
+      TRUE ~ NA_character_
+    ),
+    score_group = factor(
+      score_group,
+      levels = c("0–1", "2–3", "4–5", "6+")
+    ),
+    patient = factor(
+      patient,
+      levels = patients
+    )
+  ) %>%
+  filter(!is.na(score_group))
+
+# Calculate patient-specific mean expression and SEM
+patient_summary_df <- combined_patient_df %>%
+  group_by(patient, score_group) %>%
+  summarise(
+    n_cells = n(),
+    mean_expression = mean(
+      UBE2H_normalized,
+      na.rm = TRUE
+    ),
+    sd_expression = sd(
+      UBE2H_normalized,
+      na.rm = TRUE
+    ),
+    sem_expression = sd_expression / sqrt(n_cells),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lower_sem = mean_expression - sem_expression,
+    upper_sem = mean_expression + sem_expression
+  )
+
+patient_summary_df %>% gt()
+
+# Four distinct shades of grey
+patient_greys <- c(
+  "BT_S1" = "#222222",
+  "BT_S2" = "#555555",
+  "BT_S4" = "#888888",
+  "BT_S6" = "#C4C4C4"
+)
+
+p_combined_patient_mean_sem <- ggplot(
+  patient_summary_df,
+  aes(
+    x = score_group,
+    y = mean_expression,
+    group = patient,
+    color = patient,
+    shape = patient
+  )
+) +
+  geom_line(
+    linewidth = 0.9,
+    alpha = 0.9
+  ) +
+  geom_errorbar(
+    aes(
+      ymin = lower_sem,
+      ymax = upper_sem
+    ),
+    width = 0.10,
+    linewidth = 0.65,
+    alpha = 0.45
+  ) +
+  geom_point(
+    size = 3,
+    stroke = 0.8
+  ) +
+  scale_color_manual(
+    values = patient_greys
+  ) +
+  labs(
+    x = "Aneuploidy score excluding 7q",
+    y = "Mean UBE2H Seurat-normalized expression",
+    title = "UBE2H expression by aneuploidy score group",
+    subtitle = paste0(
+      "Patient-specific means ± SEM; ",
+      "neoplastic, chromosome 7q-neutral cells"
+    ),
+    color = "Patient",
+    shape = "Patient"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(
+      face = "bold",
+      hjust = 0.5
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size = 10.5
+    ),
+    legend.position = "right"
+  )
+
+p_combined_patient_mean_sem
+
+ggsave(
+  filename = file.path(
+    figure_dir,
+    "GSE84465_UBE2H_by_aneuploidy_score_group_patient_mean_SEM_7qneutral.svg"
+  ),
+  plot = p_combined_patient_mean_sem,
+  width = 8,
+  height = 6
+)
+```
+
+
+# Patient-adjusted regression
+
+```{r optional-patient-adjusted-regression}
+regression_df <- core_7q_neutral_df %>%
+  mutate(patient = factor(patient, levels = patients))
+
+fit_patient_adjusted <- lm(
+  UBE2H_normalized ~ aneuploidy_score_no_7q + patient,
+  data = regression_df
+)
+
+summary(fit_patient_adjusted)
+
+broom::tidy(
+  fit_patient_adjusted,
+  conf.int = TRUE
+) %>%
+  gt()
+```
+
+
+# Diagnostic: bin-level CopyKAT heatmaps
+
+```{r bin-heatmaps, fig.width=13, fig.height=8}
+copykat_col_fun <- circlize::colorRamp2(
+  c(-1, 0, 1),
+  c("#3B6FB6", "white", "#C74440")
+)
+
+group_colors <- c(
+  "Regular reference" = "#7A7A7A",
+  "Neoplastic: diploid" = "#69A45A",
+  "Neoplastic: aneuploid" = "#D18B2C",
+  "Not defined" = "#BDBDBD"
+)
+
+for (p in patients) {
+  cn_df <- cn_annotation_list[[p]]
+
+  patient_cells <- pred_all$cell.names[
+    pred_all$patient == p
+  ]
+
+  cell_cols <- intersect(
+    colnames(cn_df),
+    patient_cells
+  )
+
+  cn_mat_plot <- as.matrix(
+    cn_df[, cell_cols, drop = FALSE]
+  )
+
+  storage.mode(cn_mat_plot) <- "numeric"
+
+  bin_chr <- as.character(cn_df$chrom)
+  keep_bins <- suppressWarnings(as.numeric(bin_chr)) %in% 1:22
+
+  cn_mat_plot <- cn_mat_plot[keep_bins, , drop = FALSE]
+  bin_chr <- bin_chr[keep_bins]
+
+  cell_meta <- final_meta %>%
+    filter(
+      patient == p,
+      cell %in% colnames(cn_mat_plot)
+    ) %>%
+    select(
+      cell,
+      cell_type,
+      input_group,
+      copykat_call,
+      aneuploidy_score
+    ) %>%
+    mutate(
+      group = case_when(
+        input_group == "reference" ~ "Regular reference",
+        input_group == "observation" &
+          copykat_call == "diploid" ~ "Neoplastic: diploid",
+        input_group == "observation" &
+          copykat_call == "aneuploid" ~ "Neoplastic: aneuploid",
+        TRUE ~ "Not defined"
+      ),
+      group = factor(group, levels = names(group_colors))
+    )
+
+  rownames(cell_meta) <- cell_meta$cell
+  cell_meta <- cell_meta[colnames(cn_mat_plot), , drop = FALSE]
+
+  cell_order <- cell_meta %>%
+    arrange(group, aneuploidy_score) %>%
+    pull(cell)
+
+  cn_mat_plot <- cn_mat_plot[, cell_order, drop = FALSE]
+  cell_meta <- cell_meta[cell_order, , drop = FALSE]
+
+  bin_chr_factor <- factor(
+    bin_chr,
+    levels = as.character(1:22)
+  )
+
+  stopifnot(
+    ncol(cn_mat_plot) > 0,
+    nrow(cn_mat_plot) > 0,
+    identical(rownames(cell_meta), colnames(cn_mat_plot)),
+    length(bin_chr_factor) == nrow(cn_mat_plot),
+    !anyNA(cell_meta$group),
+    !anyNA(bin_chr_factor)
+  )
+
+  top_anno <- HeatmapAnnotation(
+    Group = cell_meta$group,
+    col = list(Group = group_colors),
+    annotation_name_side = "left"
+  )
+
+  ht <- Heatmap(
+    cn_mat_plot,
+    name = "CopyKAT",
+    col = copykat_col_fun,
+    top_annotation = top_anno,
+    cluster_rows = FALSE,
+    row_split = bin_chr_factor,
+    cluster_row_slices = FALSE,
+    row_gap = unit(0.4, "mm"),
+    cluster_columns = FALSE,
+    show_row_names = FALSE,
+    show_column_names = FALSE,
+    row_title = as.character(1:22),
+    row_title_rot = 0,
+    row_title_gp = gpar(fontsize = 8),
+    column_split = cell_meta$group,
+    column_gap = unit(2, "mm"),
+    rect_gp = gpar(col = NA),
+    column_title = paste0(p, " cells"),
+    use_raster = FALSE
+  )
+
+  ComplexHeatmap::draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right"
+  )
+}
+```
+
+
+# Diagnostic: arm-call heatmaps
+
+```{r arm-heatmaps, fig.width=13, fig.height=8}
+arm_order <- as.vector(rbind(
+  paste0(1:22, "p"),
+  paste0(1:22, "q")
+))
+
+call_colors <- c(
+  `-1` = "#3B6FB6",
+  `0` = "white",
+  `1` = "#C74440"
+)
+
+for (p in patients) {
+  arm_call <- arm_call_list[[p]]
+
+  current_order <- arm_order[
+    arm_order %in% rownames(arm_call)
+  ]
+
+  arm_call_plot <- arm_call[
+    current_order,
+    ,
+    drop = FALSE
+  ]
+
+  heatmap_meta <- final_meta %>%
+    filter(
+      patient == p,
+      cell %in% colnames(arm_call_plot)
+    ) %>%
+    select(
+      cell,
+      input_group,
+      copykat_call,
+      aneuploidy_score
+    ) %>%
+    mutate(
+      group = case_when(
+        input_group == "reference" ~ "Regular reference",
+        input_group == "observation" &
+          copykat_call == "diploid" ~ "Neoplastic: diploid",
+        input_group == "observation" &
+          copykat_call == "aneuploid" ~ "Neoplastic: aneuploid",
+        TRUE ~ "Not defined"
+      ),
+      group = factor(group, levels = names(group_colors))
+    )
+
+  rownames(heatmap_meta) <- heatmap_meta$cell
+
+  heatmap_meta <- heatmap_meta[
+    colnames(arm_call_plot),
+    ,
+    drop = FALSE
+  ]
+
+  cell_order <- heatmap_meta %>%
+    arrange(group, aneuploidy_score) %>%
+    pull(cell)
+
+  arm_call_plot <- arm_call_plot[, cell_order, drop = FALSE]
+  heatmap_meta <- heatmap_meta[cell_order, , drop = FALSE]
+
+  top_anno <- HeatmapAnnotation(
+    Group = heatmap_meta$group,
+    `Arm score` = anno_barplot(
+      heatmap_meta$aneuploidy_score,
+      border = FALSE,
+      height = unit(1.5, "cm")
+    ),
+    col = list(Group = group_colors),
+    annotation_name_side = "left"
+  )
+
+  ht <- Heatmap(
+    arm_call_plot,
+    name = "Arm call",
+    col = call_colors,
+    top_annotation = top_anno,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    show_row_names = TRUE,
+    show_column_names = FALSE,
+    row_names_side = "left",
+    row_names_gp = gpar(fontsize = 9),
+    column_split = heatmap_meta$group,
+    column_gap = unit(2, "mm"),
+    rect_gp = gpar(col = NA),
+    heatmap_legend_param = list(
+      at = c(-1, 0, 1),
+      labels = c("Loss", "Neutral", "Gain")
+    ),
+    column_title = paste0(p, " cells"),
+    row_title = "Chromosome arm"
+  )
+
+  ComplexHeatmap::draw(
+    ht,
+    heatmap_legend_side = "right",
+    annotation_legend_side = "right"
+  )
+}
+```
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```

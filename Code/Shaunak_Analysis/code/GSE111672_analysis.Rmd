@@ -1,0 +1,683 @@
+---
+title: "GSE111672 PDAC-A CopyKAT and UBE2H analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(data.table)
+library(Matrix)
+library(tidyverse)
+library(copykat)
+library(Seurat)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+library(ggpubr)
+library(gt)
+library(broom)
+library(svglite)
+library(here)
+
+dir.create(here("figures"), recursive = TRUE, showWarnings = FALSE)
+patient <- "PDAC-A"
+counts_file <- here("data", "GSE111672", "GSE111672_PDAC-A-indrop-filtered-expMat.txt")
+output_prefix <- "GSE111672_PDAC_A_inDrop_copykat"
+copykat_rds <- here("data", "GSE111672", "GSE111672_PDAC_A_inDrop_copykat.rds")
+
+exclude_arms <- c("13p", "14p", "15p", "21p", "22p")
+```
+
+# Read the patient-specific inDrop matrix
+
+```{r read-expmat}
+if (!file.exists(counts_file)) {
+  stop("Counts file not found: ", counts_file)
+}
+
+message("Reading ", patient, " expMat ...")
+df <- data.table::fread(
+  counts_file,
+  sep = "\t",
+  header = TRUE,
+  data.table = FALSE,
+  check.names = FALSE
+)
+
+cell_type <- trimws(gsub("\r", "", colnames(df)[-1]))
+cell_ids <- paste0("PDAC_A_cell_", seq_along(cell_type))
+
+genes <- trimws(gsub("\r", "", as.character(df[[1]])))
+keep_gene <- !is.na(genes) & nzchar(genes) & !duplicated(genes)
+
+mat <- as.matrix(df[keep_gene, -1, drop = FALSE])
+storage.mode(mat) <- "integer"
+rownames(mat) <- genes[keep_gene]
+colnames(mat) <- cell_ids
+rm(df)
+
+drop_rbc <- grepl("^RBC", cell_type, ignore.case = TRUE)
+mat <- mat[, !drop_rbc, drop = FALSE]
+cell_type <- cell_type[!drop_rbc]
+cell_ids <- cell_ids[!drop_rbc]
+
+stopifnot(identical(colnames(mat), cell_ids))
+
+cell_metadata <- data.frame(
+  cell = cell_ids,
+  cell_type = cell_type,
+  patient = patient,
+  row.names = cell_ids,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+cat(sprintf(
+  "%s clean matrix: %d genes x %d cells (RBCs removed)\n",
+  patient, nrow(mat), ncol(mat)
+))
+print(sort(table(cell_metadata$cell_type), decreasing = TRUE))
+```
+
+# Define patient-specific reference and observation groups
+
+```{r define-groups}
+all_labels <- sort(unique(cell_metadata$cell_type))
+obs_pattern <- "Ductal|Cancer"
+
+ref_group_names <- all_labels[!grepl(obs_pattern, all_labels, ignore.case = TRUE)]
+obs_group_names <- all_labels[grepl(obs_pattern, all_labels, ignore.case = TRUE)]
+
+norm_cells <- rownames(cell_metadata)[cell_metadata$cell_type %in% ref_group_names]
+obs_cells <- rownames(cell_metadata)[cell_metadata$cell_type %in% obs_group_names]
+
+if (length(norm_cells) < 5) {
+  stop("Fewer than five reference cells were identified for ", patient)
+}
+if (length(obs_cells) == 0) {
+  stop("No Ductal/Cancer observation cells were identified for ", patient)
+}
+
+cat("Reference groups for ", patient, ":\n", sep = "")
+print(sort(table(cell_metadata[norm_cells, "cell_type"]), decreasing = TRUE))
+
+cat("\nObservation groups for ", patient, ":\n", sep = "")
+print(sort(table(cell_metadata[obs_cells, "cell_type"]), decreasing = TRUE))
+```
+
+# Load CopyKAT
+
+```{r copykat}
+res <- readRDS(copykat_rds)
+names(res)
+str(res, max.level = 1)
+```
+
+# Check CopyKAT predictions
+
+```{r prediction-qc}
+pred_all <- as.data.frame(res$prediction) %>%
+  mutate(
+    cell_type = cell_metadata[cell.names, "cell_type"],
+    input_group = ifelse(cell.names %in% norm_cells, "reference", "observation"),
+    patient = patient
+  )
+
+cat("Overall calls:\n")
+print(table(pred_all$copykat.pred, useNA = "ifany"))
+
+cat("\nCalls by input group:\n")
+print(table(pred_all$input_group, pred_all$copykat.pred, useNA = "ifany"))
+
+cat("\nCalls by cell type:\n")
+copykat_table <- table(pred_all$cell_type, pred_all$copykat.pred, useNA = "ifany") |>
+  as.data.frame.matrix() |>
+  tibble::rownames_to_column("Cell type")
+
+copykat_table |>
+  gt() |>
+  tab_header(title = "CopyKAT predictions by cell type") |>
+  cols_label(`Cell type` = "Cell type")
+```
+
+# Extract CopyKAT CN values
+
+```{r cna-matrix}
+cn <- as.data.frame(res$CNAmat)
+
+required_annotation_cols <- c("chrom", "chrompos", "abspos")
+stopifnot(all(required_annotation_cols %in% colnames(cn)))
+
+copykat_cell_cols <- base::intersect(pred_all$cell.names, colnames(cn))
+stopifnot(length(copykat_cell_cols) > 0)
+
+cn_values <- as.matrix(cn[, copykat_cell_cols, drop = FALSE])
+storage.mode(cn_values) <- "numeric"
+
+cat("CN matrix:", nrow(cn_values), "bins x", ncol(cn_values), "cells\n")
+print(range(cn_values, na.rm = TRUE))
+print(quantile(cn_values, probs = c(0, 0.01, 0.05, 0.5, 0.95, 0.99, 1), na.rm = TRUE))
+```
+
+# Derive the bin-signal threshold from confidently-diploid cells
+
+```{r diploid-threshold}
+diploid_cells <- pred_all$cell.names[pred_all$copykat.pred == "diploid"]
+diploid_cells <- intersect(diploid_cells, colnames(cn_values))
+
+diploid_signal <- as.numeric(as.matrix(cn_values[, diploid_cells, drop = FALSE]))
+diploid_signal <- diploid_signal[is.finite(diploid_signal)]
+
+quantile(abs(diploid_signal), probs = c(0.75, 0.80, 0.90, 0.95, 0.975), na.rm = TRUE)
+
+bin_signal_threshold <- unname(quantile(abs(diploid_signal), probs = 0.90, na.rm = TRUE))
+bin_signal_threshold
+```
+
+```{r threshold-distribution}
+signal_df <- data.frame(signal = diploid_signal)
+
+ggplot(signal_df, aes(x = signal)) +
+  geom_histogram(bins = 150, boundary = 0) +
+  geom_vline(xintercept = c(-bin_signal_threshold, bin_signal_threshold),
+             linetype = "dashed", linewidth = 0.8) +
+  labs(
+    title = "Distribution of CopyKAT bin signals",
+    subtitle = paste0("90th percentile of absolute signal = \u00b1", round(bin_signal_threshold, 3)),
+    x = "CopyKAT bin signal", y = "Bin-cell observations"
+  ) +
+  theme_classic()
+```
+
+# Bin-level heatmap by cell type
+
+```{r bin-heatmap-prep}
+cn_df <- res$CNAmat
+stopifnot(all(c("chrom", "chrompos", "abspos") %in% colnames(cn_df)))
+
+cell_cols <- intersect(colnames(cn_df), res$prediction$cell.names)
+stopifnot(length(cell_cols) > 0)
+
+cn_mat_plot <- as.matrix(cn_df[, cell_cols, drop = FALSE])
+storage.mode(cn_mat_plot) <- "numeric"
+
+bin_chr <- as.character(cn_df$chrom)
+stopifnot(nrow(cn_mat_plot) == length(bin_chr),
+          all(colnames(cn_mat_plot) %in% rownames(cell_metadata)))
+
+cell_meta <- data.frame(
+  cell = colnames(cn_mat_plot),
+  cell_type = as.character(cell_metadata[colnames(cn_mat_plot), "cell_type", drop = TRUE]),
+  stringsAsFactors = FALSE
+)
+rownames(cell_meta) <- cell_meta$cell
+
+stopifnot(identical(rownames(cell_meta), colnames(cn_mat_plot)), !anyNA(cell_meta$cell_type))
+
+cell_type_order <- unique(cell_meta$cell_type)
+cell_meta$cell_type <- factor(cell_meta$cell_type, levels = cell_type_order)
+
+cell_order <- cell_meta %>% arrange(cell_type) %>% pull(cell)
+cn_mat_plot <- cn_mat_plot[, cell_order, drop = FALSE]
+cell_meta <- cell_meta[cell_order, , drop = FALSE]
+
+stopifnot(identical(colnames(cn_mat_plot), rownames(cell_meta)))
+```
+
+```{r bin-heatmap-draw, fig.width=12, fig.height=8}
+# Validation plot
+cell_type_colors <- setNames(
+  grDevices::hcl.colors(n = nlevels(cell_meta$cell_type), palette = "Dark 3"),
+  levels(cell_meta$cell_type)
+)
+
+top_anno <- HeatmapAnnotation(
+  `Cell type` = cell_meta$cell_type,
+  col = list(`Cell type` = cell_type_colors),
+  annotation_name_side = "left",
+  show_annotation_name = TRUE,
+  annotation_legend_param = list(
+    `Cell type` = list(title = "Cell type", labels_gp = gpar(fontsize = 8),
+                        title_gp = gpar(fontsize = 9, fontface = "bold"))
+  )
+)
+
+copykat_col_fun <- circlize::colorRamp2(c(-0.5, 0, 0.5), c("#3B6FB6", "white", "#C74440"))
+
+keep_bins <- bin_chr != "23"
+cn_mat_plot <- cn_mat_plot[keep_bins, , drop = FALSE]
+bin_chr <- bin_chr[keep_bins]
+bin_chr_factor <- factor(bin_chr, levels = as.character(1:22))
+
+ht <- Heatmap(
+  cn_mat_plot,
+  name = "CopyKAT",
+  col = copykat_col_fun,
+  top_annotation = top_anno,
+  cluster_rows = FALSE,
+  row_split = bin_chr_factor,
+  cluster_row_slices = FALSE,
+  row_gap = unit(0.4, "mm"),
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  row_title = as.character(1:22),
+  row_title_rot = 0,
+  row_title_gp = grid::gpar(fontsize = 9),
+  column_split = cell_meta$cell_type,
+  column_gap = unit(2, "mm"),
+  rect_gp = gpar(col = NA),
+  heatmap_legend_param = list(title = "CopyKAT", at = c(-0.5, 0, 0.5)),
+  column_title = "Cells",
+  use_raster = FALSE
+)
+
+png(filename = here("figures", "GSE111672_PDAC_A_copykat_bin_heatmap_by_cell_type.png"),
+    width = 4200, height = 2700, res = 300)
+ComplexHeatmap::draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+
+ht
+```
+
+# Normalize UBE2H expression
+
+```{r normalize-ube2h}
+seu <- CreateSeuratObject(
+  counts = as(mat, "dgCMatrix"),
+  meta.data = cell_metadata,
+  project = paste0("GSE111672_", "PDAC_A"),
+  min.cells = 0,
+  min.features = 0
+)
+
+seu <- NormalizeData(seu, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+
+ube2h_matches <- which(toupper(rownames(seu)) == "UBE2H")
+stopifnot(length(ube2h_matches) == 1)
+ube2h_id <- rownames(seu)[ube2h_matches]
+
+ube2h_df <- FetchData(seu, vars = ube2h_id, layer = "data")
+colnames(ube2h_df) <- "UBE2H_normalized"
+ube2h_df$cell <- rownames(ube2h_df)
+```
+
+# Build chromosome-arm coordinates
+
+```{r arm-coordinates}
+arm_coords <- read_csv(here("data", "arm_coords.csv"))
+```
+
+# Assign CopyKAT bins to chromosome arms
+
+```{r assign-bins-to-arms}
+bin_annot <- cn %>%
+  transmute(
+    bin_id = seq_len(nrow(cn)),
+    chrom = as.numeric(chrom),
+    chrompos = as.numeric(chrompos),
+    abspos = as.numeric(abspos)
+  )
+
+bin_arm <- bin_annot %>%
+  inner_join(
+    arm_coords %>% transmute(chrom_num, arm, arm_start = start, arm_end = end),
+    by = join_by(chrom == chrom_num, chrompos >= arm_start, chrompos < arm_end)
+  ) %>%
+  filter(!arm %in% exclude_arms) %>%
+  dplyr::select(bin_id, chrom, chrompos, abspos, arm)
+
+assignment_qc <- bin_arm %>%
+  count(bin_id) %>%
+  summarise(max_assignments = max(n), duplicated_bins = sum(n > 1))
+print(assignment_qc)
+stopifnot(assignment_qc$max_assignments <= 1)
+```
+
+# Arm-level calls and aneuploidy score
+
+An arm is called gained or lost when at least 80% of its CopyKAT genomic bins cross the selected signal threshold (derived above from confidently-diploid cells). 
+The short acrocentric p arms are excluded before arm calling and scoring.
+
+```{r arm-calls}
+print(bin_signal_threshold)
+fraction_threshold <- 0.80
+
+arms <- unique(bin_arm$arm)
+
+arm_call <- matrix(0L, nrow = length(arms), ncol = ncol(cn_values),
+                    dimnames = list(arms, colnames(cn_values)))
+
+for (a in arms) {
+  bin_ids <- bin_arm$bin_id[bin_arm$arm == a]
+  x <- cn_values[bin_ids, , drop = FALSE]
+
+  frac_gain <- colMeans(x > bin_signal_threshold, na.rm = TRUE)
+  frac_loss <- colMeans(x < -bin_signal_threshold, na.rm = TRUE)
+
+  arm_call[a, frac_gain >= fraction_threshold] <- 1L
+  arm_call[a, frac_loss >= fraction_threshold] <- -1L
+}
+
+stopifnot(!any(rownames(arm_call) %in% exclude_arms))
+stopifnot(all(arm_call %in% c(-1L, 0L, 1L)))
+
+aneuploidy_score <- colSums(abs(arm_call))
+summary(aneuploidy_score)
+```
+
+# Arm-call heatmap, by cell type (validates the custom scoring method)
+
+```{r arm-call-heatmap, fig.width=12, fig.height=8}
+arm_order <- as.vector(rbind(paste0(1:22, "p"), paste0(1:22, "q")))
+arm_order <- arm_order[arm_order %in% rownames(arm_call)]
+arm_call_plot <- arm_call[arm_order, , drop = FALSE]
+
+heatmap_meta <- pred_all %>%
+  transmute(cell = cell.names, cell_type, copykat_call = copykat.pred, input_group) %>%
+  filter(cell %in% colnames(arm_call_plot))
+
+rownames(heatmap_meta) <- heatmap_meta$cell
+heatmap_meta <- heatmap_meta[colnames(arm_call_plot), , drop = FALSE]
+
+stopifnot(identical(rownames(heatmap_meta), colnames(arm_call_plot)))
+
+heatmap_meta$aneuploidy_score <- colSums(abs(arm_call_plot))
+
+cell_type_levels <- unique(as.character(heatmap_meta$cell_type))
+heatmap_meta <- heatmap_meta %>%
+  mutate(cell_type = factor(as.character(cell_type), levels = cell_type_levels))
+
+cell_order <- heatmap_meta %>% arrange(cell_type, aneuploidy_score) %>% pull(cell)
+arm_call_plot <- arm_call_plot[, cell_order, drop = FALSE]
+heatmap_meta <- heatmap_meta[cell_order, , drop = FALSE]
+
+stopifnot(identical(colnames(arm_call_plot), rownames(heatmap_meta)))
+
+call_colors <- c(`-1` = "#3B6FB6", `0` = "white", `1` = "#C74440")
+cell_type_colors_arm <- setNames(
+  grDevices::hcl.colors(n = length(cell_type_levels), palette = "Dark 3"),
+  cell_type_levels
+)
+
+top_anno_arm <- HeatmapAnnotation(
+  `Cell type` = heatmap_meta$cell_type,
+  `Arm score` = anno_barplot(heatmap_meta$aneuploidy_score, border = FALSE, height = unit(1.5, "cm")),
+  col = list(`Cell type` = cell_type_colors_arm),
+  annotation_name_side = "left",
+  annotation_legend_param = list(
+    `Cell type` = list(title = "Cell type", labels_gp = gpar(fontsize = 8),
+                        title_gp = gpar(fontsize = 9, fontface = "bold"))
+  )
+)
+
+ht_arm <- Heatmap(
+  arm_call_plot,
+  name = "Arm call",
+  col = call_colors,
+  top_annotation = top_anno_arm,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 9),
+  column_split = heatmap_meta$cell_type,
+  column_gap = unit(2, "mm"),
+  column_title = NULL,
+  rect_gp = gpar(col = NA),
+  heatmap_legend_param = list(title = "Arm call", at = c(-1, 0, 1),
+                               labels = c("Loss", "Neutral", "Gain")),
+  row_title = "Chromosome arm"
+)
+
+png(filename = here("figures", paste0(output_prefix, "_arm_heatmap_by_cell_type.png")),
+    width = 4200, height = 2700, res = 300)
+ComplexHeatmap::draw(ht_arm, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+
+ht_arm
+```
+
+# Assemble cell-level metadata for downstream UBE2H and aneuploidy analyses
+
+```{r assemble-final-metadata}
+final_meta <- pred_all %>%
+  transmute(cell = cell.names, cell_type, copykat_call = copykat.pred, input_group) %>%
+  left_join(ube2h_df, by = "cell") %>%
+  mutate(aneuploidy_score = .env$aneuploidy_score[match(cell, names(.env$aneuploidy_score))]) %>%
+  filter(input_group == "observation", !is.na(aneuploidy_score), !is.na(UBE2H_normalized))
+```
+
+# Chromosome 7q status
+
+```{r chr7q-status}
+stopifnot("7q" %in% rownames(arm_call))
+
+final_meta <- final_meta %>%
+  mutate(
+    chr7q_call = arm_call["7q", match(cell, colnames(arm_call))],
+    chr7q_status = factor(chr7q_call, levels = c(-1, 0, 1), labels = c("Loss", "Neutral", "Gain"))
+  )
+
+plot_df_7q <- final_meta %>%
+  filter(input_group == "observation", !is.na(UBE2H_normalized), !is.na(chr7q_status))
+
+print(table(plot_df_7q$chr7q_status, useNA = "ifany"))
+
+if (nlevels(droplevels(plot_df_7q$chr7q_status)) >= 2) {
+  pairwise_results_7q <- compare_means(
+    UBE2H_normalized ~ chr7q_status, data = plot_df_7q,
+    method = "wilcox.test", p.adjust.method = "BH"
+  )
+  pairwise_results_7q %>% gt()
+}
+```
+
+# Aneuploidy score excluding chromosome 7q
+
+This removes 7q from the burden, preventing the chromosome arm carrying UBE2H from contributing to the predictor.
+
+```{r score-without-chr7q}
+chr7q_arm <- intersect("7q", rownames(arm_call))
+arm_call_no_chr7q <- arm_call[!rownames(arm_call) %in% chr7q_arm, , drop = FALSE]
+
+aneuploidy_score_no_chr7q <- colSums(abs(arm_call_no_chr7q))
+
+lm_df <- final_meta %>%
+  mutate(
+    aneuploidy_score_no_chr7q = .env$aneuploidy_score_no_chr7q[match(cell, names(.env$aneuploidy_score_no_chr7q))],
+    chr7q_status = relevel(factor(chr7q_status), ref = "Neutral")
+  ) %>%
+  filter(input_group == "observation", !is.na(UBE2H_normalized),
+         !is.na(aneuploidy_score_no_chr7q), !is.na(chr7q_status))
+
+cor_no_chr7q <- cor.test(lm_df$aneuploidy_score_no_chr7q, lm_df$UBE2H_normalized,
+                         method = "spearman", exact = FALSE)
+cor_no_chr7q
+
+fit_7q_adjusted <- lm(UBE2H_normalized ~ aneuploidy_score_no_chr7q + chr7q_status, data = lm_df)
+summary(fit_7q_adjusted)
+broom::tidy(fit_7q_adjusted, conf.int = TRUE) %>% gt()
+```
+
+# UBE2H by fixed aneuploidy-score groups (cancer cells, chr7q-neutral only)
+
+```{r fixed-score-bin-plot, fig.width=7, fig.height=5.5}
+# Cancer cells only, chromosome 7q-neutral only
+pdac_plot_df <- lm_df %>%
+  filter(
+    cell_type %in% c("Cancer clone A", "Cancer clone B"),
+    chr7q_status == "Neutral",
+    !is.na(aneuploidy_score_no_chr7q),
+    !is.na(UBE2H_normalized)
+  )
+
+cat(
+  "Final plotting subset:",
+  nrow(pdac_plot_df),
+  "cells\n"
+)
+
+cat(
+  "Aneuploidy-score range:",
+  min(pdac_plot_df$aneuploidy_score_no_chr7q, na.rm = TRUE),
+  "to",
+  max(pdac_plot_df$aneuploidy_score_no_chr7q, na.rm = TRUE),
+  "\n"
+)
+
+# Spearman correlation is calculated using the original continuous, cell-level aneuploidy score. 
+# Score groups are used only to visualize the zero-heavy UBE2H expression distribution.
+pdac_cor <- cor.test(
+  pdac_plot_df$aneuploidy_score_no_chr7q,
+  pdac_plot_df$UBE2H_normalized,
+  method = "spearman",
+  exact = FALSE
+)
+
+pdac_cor
+
+pdac_cor_label <- sprintf(
+  "\u03c1 = %.2f\np %s",
+  unname(pdac_cor$estimate),
+  ifelse(
+    pdac_cor$p.value < 2.2e-16,
+    "< 2.2e-16",
+    sprintf("= %.3g", pdac_cor$p.value)
+  )
+)
+
+# Using fixed score groups only for visualization.
+# Identical integer scores remain in the same group.
+pdac_plot_df <- pdac_plot_df %>%
+  mutate(
+    score_group = case_when(
+      aneuploidy_score_no_chr7q %in% 0:1 ~ "0–1",
+      aneuploidy_score_no_chr7q == 2 ~ "2",
+      aneuploidy_score_no_chr7q >= 3 ~ "3+",
+      TRUE ~ NA_character_
+    ),
+    score_group = factor(
+      score_group,
+      levels = c("0–1", "2", "3+")
+    )
+  )
+
+pdac_group_counts <- pdac_plot_df %>%
+  count(
+    score_group,
+    name = "n_cells",
+    .drop = FALSE
+  )
+
+# Confirming that all plotting cells were assigned to a group.
+if (anyNA(pdac_plot_df$score_group)) {
+  warning(
+    sum(is.na(pdac_plot_df$score_group)),
+    " cells were not assigned to a score group."
+  )
+}
+
+pdac_plot_df <- pdac_plot_df %>%
+  filter(!is.na(score_group))
+
+# Checking number of cells contributing to each box.
+pdac_group_counts %>%
+  gt() %>%
+  tab_header(
+    title = "PDAC-A cells per aneuploidy-score group"
+  ) %>%
+  cols_label(
+    score_group = "Aneuploidy-score group",
+    n_cells = "Number of cells"
+  )
+
+# Boxplot.
+p_pdac_score_group <- ggplot(
+  pdac_plot_df,
+  aes(
+    x = score_group,
+    y = UBE2H_normalized
+  )
+  ) +
+  geom_boxplot(
+    fill = "#B44FA3",
+    color = "black",
+    outlier.shape = NA,
+    width = 0.6,
+    linewidth = 0.6,
+    alpha = 0.8
+  ) +
+  annotate(
+    "text",
+    x = -Inf,
+    y = Inf,
+    label = pdac_cor_label,
+    hjust = -0.15,
+    vjust = 1.5,
+    size = 5
+  ) +
+  labs(
+    x = "Aneuploidy score excluding 7q",
+    y = "UBE2H Seurat-normalized expression",
+    title = paste0(
+      patient,
+      ": UBE2H by aneuploidy score group"
+    ),
+    subtitle = "Cancer cells, chromosome 7q-neutral only"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.text = element_text(
+      color = "black",
+      face = "bold"
+    ),
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(
+      face = "bold",
+      hjust = 0.5
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      size = 11,
+      color = "grey30"
+    )
+  )
+
+print(p_pdac_score_group)
+
+ggsave(
+  filename = here(
+    "figures",
+    paste0(
+      output_prefix,
+      "_UBE2H_by_aneuploidy_score_groups_cancer_7qneutral.svg"
+    )
+  ),
+  plot = p_pdac_score_group,
+  width = 7,
+  height = 5.5
+)
+
+ggsave(
+  filename = here(
+    "figures",
+    paste0(
+      output_prefix,
+      "_UBE2H_by_aneuploidy_score_groups_cancer_7qneutral.png"
+    )
+  ),
+  plot = p_pdac_score_group,
+  width = 7,
+  height = 5.5,
+  dpi = 600
+)
+```
+
+
+```{r session-info}
+sessionInfo()
+```

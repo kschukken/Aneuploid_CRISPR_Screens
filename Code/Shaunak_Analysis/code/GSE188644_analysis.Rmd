@@ -1,0 +1,201 @@
+---
+title: "GSE188644_UBE2H_analysis"
+author: "Shaunak"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup and libs}
+library(here)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+```
+
+
+```{r}
+dir.create(here("figures"), recursive = TRUE, showWarnings = FALSE)
+count_files <- list.files(path = here("data", "GSE188644"), pattern = "counts_gene.txt.gz$", full.names = TRUE)
+count_files
+all_data <- lapply(count_files, function(f) {
+  read.delim(f, header = TRUE)
+})
+# confirming if every file has genes in the same order before assuming a plain cbind is safe
+gene_symbols <- lapply(all_data, function(df) df$Symbol)
+stopifnot(all(sapply(gene_symbols, identical, gene_symbols[[1]])))
+```
+
+
+```{r}
+# Build the raw counts matrix (there are duplicates present at this point) 
+raw_counts <- sapply(all_data, function(df) df$Count)
+colnames(raw_counts) <- gsub("_RNA_Seq.*", "", basename(count_files))
+rownames(raw_counts) <- NULL  # deliberately no rownames yet to avoid the auto-uniquify
+symbols <- gene_symbols[[1]]  # original symbols, kept separately
+cat(sprintf("Raw matrix: %d gene rows (%d unique symbols, %d duplicated)\n",
+            nrow(raw_counts), length(unique(symbols)), sum(duplicated(symbols))))
+ 
+# --- Collapse duplicate symbols by summing, using the ORIGINAL symbol vector ---
+counts_collapsed <- rowsum(raw_counts, group = symbols)
+ 
+cat(sprintf("Collapsed matrix: %d unique gene rows\n", nrow(counts_collapsed)))
+stopifnot(sum(duplicated(rownames(counts_collapsed))) == 0)
+ 
+# sanity check UBE2H survived and looks reasonable
+counts_collapsed["UBE2H", ]
+```
+
+
+```{r}
+# Build sample metadata directly from the (already clean) column names
+sample_info <- data.frame(
+  sample = colnames(counts_collapsed),
+  LMB2OE = ifelse(grepl("LMB2OE", colnames(counts_collapsed)), "OE", "Control"),
+  treatment = ifelse(grepl("Reversine", colnames(counts_collapsed)), "Reversine", "DMSO")
+)
+rownames(sample_info) <- sample_info$sample
+sample_info$treatment <- factor(sample_info$treatment, levels = c("DMSO", "Reversine"))
+sample_info$LMB2OE <- factor(sample_info$LMB2OE, levels = c("Control", "OE"))
+ 
+print(sample_info)
+stopifnot(all(colnames(counts_collapsed) == rownames(sample_info)))
+```
+```{r}
+# Keeping only LMB2OE == "Control" samples
+non_oe_samples <- rownames(sample_info)[sample_info$LMB2OE == "Control"]
+
+counts_non_oe <- counts_collapsed[, non_oe_samples]
+sample_info_non_oe <- sample_info[non_oe_samples, ]
+
+dim(counts_non_oe)  # should be 6 samples now (3 DMSO + 3 Reversine, non-OE only)
+table(sample_info_non_oe$treatment)
+```
+
+
+```{r}
+# --- Run DESeq2 ---
+dds <- DESeqDataSetFromMatrix(
+  countData = round(counts_non_oe),
+  colData = sample_info_non_oe,
+  design = ~ treatment
+)
+ 
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
+ 
+res <- results(dds, contrast = c("treatment", "Reversine", "DMSO"))
+ 
+cat("\n=== UBE2H result (Reversine vs DMSO) ===\n")
+print(res["UBE2H", ])
+```
+
+```{r}
+# --- 1. PCA: do samples separate the way we'd expect? ---
+vsd <- vst(dds, blind = TRUE)
+p_pca <- plotPCA(vsd, intgroup = c("treatment", "LMB2OE")) +
+  theme_minimal(base_size = 13) +
+  labs(title = "GSE188644: sample PCA")
+ 
+print(p_pca)
+ggsave(here("figures", "GSE188644_PCA.png"), p_pca, width = 6, height = 5, dpi = 300)
+```
+
+```{r}
+# --- Volcano plot ---
+ 
+volcano_df <- as.data.frame(res)
+volcano_df$gene <- rownames(volcano_df)
+volcano_df <- volcano_df[!is.na(volcano_df$padj), ]
+ 
+volcano_df$significant <- ifelse(volcano_df$padj < 0.05 & abs(volcano_df$log2FoldChange) >= 1,
+                                  "Significant", "Not significant")
+ 
+p_volcano <- ggplot(volcano_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = significant), alpha = 0.5, size = 1.2) +
+  scale_color_manual(values = c("Significant" = "#d64545", "Not significant" = "grey75")) +
+  geom_point(data = volcano_df[volcano_df$gene == "UBE2H", ],
+             color = "#1f4fd6", size = 3.5) +
+  geom_text_repel(data = volcano_df[volcano_df$gene == "UBE2H", ],
+                   aes(label = gene), color = "#1f4fd6", fontface = "bold",
+                   nudge_y = 4, size = 4.5) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey40") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey40") +
+  labs(
+    title = "GSE188644: Reversine vs DMSO (non-OE only)",
+    subtitle = "RPE-1 p53KO, n = 3 DMSO, n = 3 Reversine",
+    x = expression(log[2]*" fold change"),
+    y = expression(-log[10]*"(adjusted p-value)"),
+    color = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+ 
+print(p_volcano)
+
+ggsave(here("figures", "GSE188644_volcano_UBE2H_nonOE.png"), p_volcano, width = 7, height = 6, dpi = 300)
+ggsave(here("figures", "GSE188644_volcano_UBE2H_nonOE.svg"), p_volcano, width = 7, height = 6)
+```
+
+```{r}
+# --- UBE2H boxplot + points, n=3 per group ---
+ 
+ube2h_counts <- plotCounts(dds, gene = "UBE2H", intgroup = "treatment", returnData = TRUE, normalized = TRUE)
+ 
+p_box <- ggplot(ube2h_counts, aes(x = treatment, y = count, fill = treatment)) +
+  geom_boxplot(width = 0.4, alpha = 0.35, outlier.shape = NA, linewidth = 0.6) +
+  geom_point(size = 3.5, shape = 21, color = "black", stroke = 0.8,
+             position = position_jitter(width = 0.06, seed = 1)) +
+  scale_fill_manual(values = c("DMSO" = "#4573d6", "Reversine" = "#d64545")) +
+  labs(
+    title = "UBE2H expression: Reversine vs DMSO",
+    subtitle = sprintf("GSE188644, RPE-1 p53KO, non-OE | padj = %.1e", res["UBE2H", "padj"]),
+    x = NULL,
+    y = "Normalized UBE2H count",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 13)
+  )
+ 
+print(p_box)
+ggsave(here("figures", "GSE188644_UBE2H_boxplot_nonOE.png"), p_box, width = 5.5, height = 6, dpi = 300)
+ggsave(here("figures", "GSE188644_UBE2H_boxplot_nonOE.svg"), p_box, width = 5.5, height = 6)
+```
+
+```{r}
+# --- T-test, using DESeq2's normalized counts ---
+
+norm_counts_nonOE <- counts(dds, normalized = TRUE)
+ube2h_norm_nonOE <- norm_counts_nonOE["UBE2H", ]
+
+t_test_df_188644 <- data.frame(
+  sample = names(ube2h_norm_nonOE),
+  ube2h_norm = ube2h_norm_nonOE,
+  treatment = sample_info_non_oe[names(ube2h_norm_nonOE), "treatment"]
+)
+t_test_df_188644$ube2h_log <- log2(t_test_df_188644$ube2h_norm + 1)
+
+t_test_result_188644 <- t.test(ube2h_norm ~ treatment, data = t_test_df_188644)
+print(t_test_result_188644)
+
+t_test_log_result_188644 <- t.test(ube2h_log ~ treatment, data = t_test_df_188644)
+print(t_test_log_result_188644)
+```
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```

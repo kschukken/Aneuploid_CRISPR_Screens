@@ -1,0 +1,283 @@
+---
+title: "GSE313191_pseudobulk"
+author: "Shaunak"
+date: "2026-07-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(here)
+library(Seurat)
+library(dplyr)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(tidyr)
+library(Matrix)
+library(svglite)
+```
+
+```{r}
+dir.create(here("figures"), recursive = TRUE, showWarnings = FALSE)
+
+# --- Step 0 (optional): create seurat objects for all samples ---
+
+# Loading authors' metadata 
+meta_313191 <- read.csv(here("data", "GSE313191", "GSE313191_metadata.csv"))
+
+# Creating seurat objects for each sample
+
+samples <- c("ESC_ETiX_DD", "ESC_ETiX_DA", "ESC_ETiX_AA",
+             "iGata4_ETiX_DD", "iGata4_ETiX_DA", "iGata4_ETiX_AA",
+             "TSC_ETiX_DD", "TSC_ETiX_DA", "TSC_ETiX_AA")
+setdiff(samples, meta_313191$title)
+
+seurat_list <- list()
+for (i in seq_len(nrow(meta_313191))) {
+  gsm <- meta_313191$geo_accession[i]
+  sample_name <- meta_313191$title[i]
+  
+  gsm_files <- list.files(here("data", "GSE313191"), pattern = gsm, full.names = TRUE)
+  
+  mat_file <- grep("matrix", gsm_files, value = TRUE)
+  feat_file <- grep("features", gsm_files, value = TRUE)
+  bc_file <- grep("barcodes", gsm_files, value = TRUE)
+  
+  if (length(mat_file) == 0 || length(feat_file) == 0 || length(bc_file) == 0) {
+    warning(paste("Missing files for", gsm, sample_name))
+    next
+  }
+  
+  mat <- readMM(mat_file)
+  features <- read.delim(feat_file, header = FALSE)
+  barcodes <- read.delim(bc_file, header = FALSE)
+  
+  rownames(mat) <- make.unique(features$V2)
+  colnames(mat) <- barcodes$V1
+  
+  obj <- CreateSeuratObject(counts = mat, project = sample_name)
+  obj$sample_condition <- sample_name
+  obj$ploidy_group <- ifelse(grepl("_DD$", sample_name), "diploid", "needs_copykat")
+  
+  seurat_list[[sample_name]] <- obj
+}
+
+# check cell counts per object
+sapply(seurat_list, ncol)
+# check Ube2h in mouse data
+sapply(seurat_list, function(x) grep("Ube2h", rownames(x), ignore.case = TRUE, value = TRUE))
+
+# save
+saveRDS(seurat_list, file = here("data", "GSE313191", "GSE313191_seurat_list_9samples.rds"))
+```
+
+
+```{r}
+# --- Step 1: load all 9 objects ---
+seurat_list_313191 <- readRDS(here("data", "GSE313191", "GSE313191_seurat_list_9samples.rds"))
+names(seurat_list_313191)
+```
+
+```{r}
+# --- Step 2: keep only DD and AA samples ---
+keep_samples <- grep("_DD$|_AA$", names(seurat_list_313191), value = TRUE)
+seurat_list_dd_aa <- seurat_list_313191[keep_samples]
+names(seurat_list_dd_aa)  # should be 6: 3 lineages x (DD, AA)
+```
+
+```{r}
+# --- Step 3: single-cell QC on the remaining 6 samples ---
+
+qc_outliers <- function(x, nmads = 3, log = TRUE) {
+  if (log) x <- log1p(x)
+  med <- median(x, na.rm = TRUE)
+  mad_val <- mad(x, na.rm = TRUE)
+  x < (med - nmads * mad_val) | x > (med + nmads * mad_val)
+}
+ 
+for (s in names(seurat_list_dd_aa)) {
+  obj <- seurat_list_dd_aa[[s]]
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+ 
+  obj$outlier_nFeature <- qc_outliers(obj$nFeature_RNA)
+  obj$outlier_nCount <- qc_outliers(obj$nCount_RNA)
+  obj$outlier_mt <- qc_outliers(obj$percent.mt, log = FALSE)  # mito % - don't log-transform a percentage
+  obj$outlier_any <- obj$outlier_nFeature | obj$outlier_nCount | obj$outlier_mt
+ 
+  cat(sprintf("[%s] %d/%d cells flagged as outliers (%.1f%%)\n",
+              s, sum(obj$outlier_any), ncol(obj), 100 * mean(obj$outlier_any)))
+ 
+  seurat_list_dd_aa[[s]] <- obj
+}
+ 
+# visualizing before committing to removal
+for (s in names(seurat_list_dd_aa)) {
+  print(VlnPlot(seurat_list_dd_aa[[s]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) +
+          patchwork::plot_annotation(title = s))
+}
+
+# Thresholds set by authors of the original preprint
+mt_ceiling <- 25
+nfeature_min <- 500
+nfeature_max <- 5000
+ncount_max <- 50000
+
+for (s in names(seurat_list_dd_aa)) {
+  obj <- seurat_list_dd_aa[[s]]
+  obj$outlier_paper_qc <- obj$percent.mt >= mt_ceiling |
+                          obj$nFeature_RNA < nfeature_min |
+                          obj$nFeature_RNA > nfeature_max |
+                          obj$nCount_RNA > ncount_max
+
+  cat(sprintf("[%s] %d/%d cells fail paper's exact QC thresholds (%.1f%%)\n",
+              s, sum(obj$outlier_paper_qc), ncol(obj), 100 * mean(obj$outlier_paper_qc)))
+
+  # actually remove the flagged cells - this line was missing
+  obj <- subset(obj, subset = outlier_paper_qc == FALSE)
+
+  seurat_list_dd_aa[[s]] <- obj
+}
+
+sapply(seurat_list_dd_aa, ncol)  # confirm counts dropped
+
+# re-plot AFTER the actual subset, to confirm it worked
+for (s in names(seurat_list_dd_aa)) {
+  print(VlnPlot(seurat_list_dd_aa[[s]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3) +
+          patchwork::plot_annotation(title = s))
+}
+
+sapply(seurat_list_dd_aa, ncol)  # cell counts after QC
+
+saveRDS(seurat_list_dd_aa, file = here("data", "GSE313191", "GSE313191_seurat_list_DD_AA_QCd.rds")) 
+```
+
+```{r}
+# --- Step 4: pseudobulk - sum raw counts per gene, across all cells, per sample ---
+pseudobulk_counts <- sapply(seurat_list_dd_aa, function(obj) {
+  raw_counts <- GetAssayData(obj, layer = "counts")
+  rowSums(raw_counts)
+})
+ 
+dim(pseudobulk_counts)  # genes x 6 pseudobulk samples
+head(pseudobulk_counts)
+```
+
+```{r}
+# --- Step 5: build sample metadata (lineage that was treated + condition) from sample names ---
+sample_info <- data.frame(
+  sample = colnames(pseudobulk_counts),
+  lineage = sub("_ETiX_(DD|AA)$", "", colnames(pseudobulk_counts)),
+  condition = sub(".*_ETiX_", "", colnames(pseudobulk_counts))
+)
+rownames(sample_info) <- sample_info$sample
+sample_info$condition <- factor(sample_info$condition, levels = c("DD", "AA"))
+sample_info$lineage <- factor(sample_info$lineage)
+ 
+print(sample_info)
+stopifnot(all(colnames(pseudobulk_counts) == rownames(sample_info)))
+```
+
+
+```{r}
+# --- Step 6: DESeq2, lineage as covariate ---
+dds_313191 <- DESeqDataSetFromMatrix(
+  countData = round(pseudobulk_counts),
+  colData = sample_info,
+  design = ~ lineage + condition
+)
+ 
+dds_313191 <- dds_313191[rowSums(counts(dds_313191)) >= 10, ]
+dds_313191 <- DESeq(dds_313191)
+ 
+resultsNames(dds_313191)
+ 
+res_313191 <- results(dds_313191, contrast = c("condition", "AA", "DD"))
+ 
+cat("\n=== Ube2h result (AA vs DD, pseudobulk, lineage as covariate) ===\n")
+print(res_313191["Ube2h", ])
+```
+
+```{r}
+# --- Volcano plot ---
+ 
+volcano_df <- as.data.frame(res_313191)
+volcano_df$gene <- rownames(volcano_df)
+volcano_df <- volcano_df[!is.na(volcano_df$padj), ]
+ 
+volcano_df$significant <- ifelse(volcano_df$padj < 0.05 & abs(volcano_df$log2FoldChange) >= 1,
+                                  "Significant", "Not significant")
+ 
+p_volcano_313191 <- ggplot(volcano_df, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = significant), alpha = 0.4, size = 1.2) +
+  scale_color_manual(values = c("Significant" = "#d64545", "Not significant" = "grey75")) +
+  geom_point(data = volcano_df[volcano_df$gene == "Ube2h", ],
+             color = "#1f4fd6", size = 3.5) +
+  geom_text_repel(data = volcano_df[volcano_df$gene == "Ube2h", ],
+                   aes(label = gene), color = "#1f4fd6", fontface = "bold",
+                   nudge_y = 3, size = 4.2) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey40") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey40") +
+  coord_cartesian(ylim = c(0, 75)) +
+  labs(
+    title = "GSE313191: pseudobulk AA vs DD",
+    subtitle = "Lineage-adjusted (design = ~ lineage + condition), n = 3 lineages per condition",
+    x = expression(log[2]*" fold change"),
+    y = expression(-log[10]*"(adjusted p-value)"),
+    color = NULL
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  )
+
+print(p_volcano_313191)
+ggsave(here("figures", "GSE313191_pseudobulk_volcano.png"), p_volcano_313191, width = 7.5, height = 6.5, dpi = 600)
+ggsave(here("figures", "GSE313191_pseudobulk_volcano.svg"), p_volcano_313191, width = 7.5, height = 6.5)
+```
+
+```{r}
+# --- Per-lineage DD vs AA paired comparison (n=1 per group, so points + connecting lines) ---
+ 
+norm_counts_313191 <- counts(dds_313191, normalized = TRUE)
+ube2h_norm_313191 <- norm_counts_313191["Ube2h", ]
+ 
+ube2h_df_313191 <- data.frame(
+  sample = names(ube2h_norm_313191),
+  ube2h = ube2h_norm_313191
+) %>%
+  left_join(sample_info, by = "sample")
+ 
+p_lineage_313191 <- ggplot(ube2h_df_313191, aes(x = condition, y = ube2h, group = lineage, color = lineage)) +
+  geom_line(linewidth = 1, alpha = 0.7) +
+  geom_point(size = 4) +
+  scale_color_manual(values = c("ESC" = "#d64545", "iGata4" = "#4573d6", "TSC" = "#e8a33d")) +
+  labs(
+    title = "Ube2h expression: DD vs AA, by lineage",
+    subtitle = sprintf("GSE313191 pseudobulk | padj = %.3f (lineage-adjusted)", res_313191["Ube2h", "padj"]),
+    x = NULL, y = "Ube2h normalized count", color = "Lineage"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    axis.title = element_text(face = "bold", size = 12),
+    panel.grid.minor = element_blank()
+  )
+ 
+print(p_lineage_313191)
+ggsave(here("figures", "GSE313191_pseudobulk_UBE2H_by_lineage.png"), p_lineage_313191, width = 6.5, height = 6, dpi = 600)
+ggsave(here("figures", "GSE313191_pseudobulk_UBE2H_by_lineage.svg"), p_lineage_313191, width = 6.5, height = 6)
+```
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```
